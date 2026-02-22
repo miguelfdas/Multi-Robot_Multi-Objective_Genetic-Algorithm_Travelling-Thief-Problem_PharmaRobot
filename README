@@ -1,0 +1,35 @@
+# Multi-Objective Multi-Robot Travelling Thief Problem (TTP)
+
+A Genetic Algorithm (GA) framework that simultaneously solves task allocation and global route planning using the Travelling Thief Problem (TTP) as a benchmark. 
+The two subproblems — a Knapsack and a Travelling Salesman Problem are encoded into a single chromosome and optimised jointly.
+
+The problem is extended to K robots operating in parallel, each with its own tour and knapsack.
+Three objectives are minimised simultaneously: Task Completion Time, Makespan, and negated Weighted Profit.
+
+## Dependencies:
+
+- `numpy`
+- `scipy`
+- `pandas`
+- `joblib`
+
+### Install with:
+```bash
+pip install numpy scipy pandas joblib
+```
+
+## Usage:
+```bash 
+python main.py
+```
+
+## References
+
+1. Bonyadi, M. R., Michalewicz, Z., & Barone, L. (2013). *The travelling thief problem: The first step in the transition from theoretical problems to realistic problems.* IEEE CEC, 1037–1044.
+2. Polyakovskiy, S., et al. (2014). *A comprehensive benchmark set for the travelling thief problem.* GECCO, 477–484.
+3. Davis, L. (1985). *Applying adaptive algorithms to epistatic domains.* IJCAI, 162–164.
+4. Syswerda, G. (1989). *Uniform crossover in genetic algorithms.* ICGA, 2–9.
+5. Michalewicz, Z. (1996). *Genetic Algorithms + Data Structures = Evolution Programs* (3rd ed.). Springer.
+6. Miller, B. L., & Goldberg, D. E. (1995). *Genetic algorithms, tournament selection, and the effects of noise.* Complex Systems, 9(3), 193–212.
+7. Zhang, Q., & Li, H. (2007). *MOEA/D: A multiobjective evolutionary algorithm based on decomposition.* IEEE TEVC, 11(6), 712–731.
+8. Gerkey, B. P., & Matarić, M. J. (2004). *A formal analysis and taxonomy of task allocation in multi-robot systems.* IJRR, 23(9), 939–954.
