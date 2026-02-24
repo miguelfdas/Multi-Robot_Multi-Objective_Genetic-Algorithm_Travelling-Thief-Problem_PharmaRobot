@@ -1,7 +1,7 @@
 # Multi-Objective Multi-Robot Travelling Thief Problem (TTP)
 
 A Genetic Algorithm (GA) framework that simultaneously solves task allocation and global route planning using the Travelling Thief Problem (TTP) as a benchmark. 
-The two subproblems — a Knapsack and a Travelling Salesman Problem are encoded into a single chromosome and optimised jointly.
+The two subproblems - a Knapsack and a Travelling Salesman Problem are encoded into a single chromosome and optimised jointly.
 
 The problem is extended to K robots operating in parallel, each with its own tour and knapsack.
 Three objectives are minimised simultaneously: Task Completion Time, Makespan, and negated Weighted Profit.

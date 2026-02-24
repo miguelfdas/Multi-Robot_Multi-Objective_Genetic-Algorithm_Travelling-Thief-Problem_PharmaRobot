@@ -50,13 +50,14 @@ class GeneticAlgorithm:
     Dynamic weight adjustment (multi-objective)
     """
     
-    def __init__(self, problem, pop_size=100, generations=500, cx_pb=0.8, mut_pb_tour=0.2, mut_pb_pack=0.002, tournament_size=3, elitism=2, n_jobs=-1, seed=None):
+    def __init__(self, problem, pop_size=100, generations=500, cx_pb_tour=0.8, cx_pb_pack=0.8, mut_pb_tour=0.2, mut_pb_pack=0.002, tournament_size=3, elitism=2, n_jobs=-1, seed=None):
         """
         Initialize Genetic Algorithm.
         
         Args:
             problem: TTProblem instance
-            cx_pb: Crossover probability
+            cx_pb_tour: Tour crossover probability
+            cx_pb_pack: Packing crossover probability
             mut_pb_tour: Tour mutation probability
             mut_pb_pack: Packing mutation probability
             n_jobs: Number of parallel workers (-1 = all CPUs)
@@ -66,7 +67,8 @@ class GeneticAlgorithm:
         
         self.pop_size = pop_size
         self.generations = generations
-        self.cx_pb = cx_pb
+        self.cx_pb_tour = cx_pb_tour
+        self.cx_pb_pack = cx_pb_pack
         self.mut_pb_tour = mut_pb_tour
         self.mut_pb_pack = mut_pb_pack # mut_pb_pack = 0.002 = 1/n = 1/495 where n is the num_items
         self.tournament_size = tournament_size
@@ -77,6 +79,14 @@ class GeneticAlgorithm:
         self.population = []
         self.metrics = []
         self.current_gen = 0
+        
+        # Bounds for adaptive mutation (never go below base / 5 or above base * 5)
+        self.mut_tour_base = mut_pb_tour
+        self.mut_pack_base = mut_pb_pack
+        self.mut_tour_min  = mut_pb_tour / 5.0
+        self.mut_tour_max  = min(mut_pb_tour * 5.0, 1.0)
+        self.mut_pack_min  = mut_pb_pack / 5.0
+        self.mut_pack_max  = min(mut_pb_pack * 5.0, 1.0)
         
         # Multi-objective weights (adaptive)
         # Initial weights: equal importance to all objectives
@@ -94,6 +104,10 @@ class GeneticAlgorithm:
         self.hv_reference_point = np.array([5000.0, 200000.0, 0.1])
         
         self.rng = np.random.RandomState(seed)
+        
+        self.best_individual = None # best solution found
+        self.best_fitness = np.inf # fitness of best solution found
+        self.best_found_at_gen = 0 # generation when best solution was found
     
     def normalize_objectives(self, objectives):
         """
@@ -388,16 +402,6 @@ class GeneticAlgorithm:
                     choices = valid_robots + [-1]
                     assignment[i] = self.rng.choice(choices)
     
-    def apply_crossover(self, parent1, parent2):
-        child1 = parent1.copy()
-        child2 = parent2.copy()
-        
-        for k in range(self.problem.num_robots):
-            child1.tours[k], child2.tours[k] = self.crossover_ox(parent1.tours[k], parent2.tours[k])
-        child1.item_assignment, child2.item_assignment = self.crossover_uniform(parent1.item_assignment, parent2.item_assignment)
-        
-        return child1, child2
-    
     def calculate_diversity(self):
         """
         Calculate population diversity metrics.
@@ -437,6 +441,51 @@ class GeneticAlgorithm:
             priority_div = 0.0
         
         return genotypic, phenotypic, priority_div
+    
+    def update_best_individual(self):
+        for ind in self.population:
+            if ind.scalar_fitness < self.best_fitness:
+                self.best_fitness = ind.scalar_fitness
+                self.best_individual = ind.copy()
+                self.best_found_at_gen = self.current_gen
+                
+    def adapt_mutation_rate(self, genotypic_diversity):
+        """
+        Adaptive Mutation Rate based on Population Diversity (Eiben et al., 1999).
+
+        The intuition is:
+          - When diversity is *low*  the population has converged → increase
+            mutation to escape local optima and re-introduce variation.
+          - When diversity is *high* exploration is already adequate → reduce
+            mutation to avoid disrupting good solutions.
+
+        A normalised diversity signal d ∈ [0, 1] is mapped to a mutation
+        scale factor via a monotonically *decreasing* linear schedule:
+
+        - scale(d) = scale_max - d x (scale_max - scale_min)
+
+        where scale_max = 3.0 and scale_min = 0.5.
+        The raw rates are clamped to [_mut_*_min, _mut_*_max] so they never
+        degenerate to zero or become excessively disruptive.
+
+        Eiben, A. E., Hinterding, R., & Michalewicz, Z. (1999).
+        "Parameter control in evolutionary algorithms."
+        IEEE Transactions on Evolutionary Computation, 3(2), 124–141.
+        """
+        # Target diversity for "neutral" (no change) mutation rate
+        scale_high = 3.0   # multiplier when diversity → 0
+        scale_low = 0.5    # multiplier when diversity → 1
+
+        d_norm = float(np.clip(genotypic_diversity, 0.0, 1.0))
+
+        # Linear interpolation: high scale when low diversity, low scale when high
+        # At d=0: scale = scale_high
+        # At d=target: scale ≈ 1  (neutral)
+        # At d=1: scale = scale_low
+        scale = scale_high - d_norm * (scale_high - scale_low)
+
+        self.mut_pb_tour = float(np.clip(self.mut_tour_base * scale, self.mut_tour_min, self.mut_tour_max))
+        self.mut_pb_pack = float(np.clip(self.mut_pack_base * scale, self.mut_pack_min, self.mut_pack_max))
     
     def compute_pareto_front(self, objectives_array):
         """
@@ -478,7 +527,7 @@ class GeneticAlgorithm:
             slice_height = prev_f3 - front[k, 2]
             
             slice_points = front[:k+1, :2]
-            area_2d = self._compute_hypervolume_2d(
+            area_2d = self.compute_hypervolume_2d(
                 slice_points, 
                 reference_point_hv[:2]
             )
@@ -488,7 +537,7 @@ class GeneticAlgorithm:
         
         return hv
 
-    def _compute_hypervolume_2d(self, points, ref):
+    def compute_hypervolume_2d(self, points, ref):
         if len(points) == 0:
             return 0.0
         
@@ -535,7 +584,7 @@ class GeneticAlgorithm:
             'generation': generation,
             
             # Scalar fitness
-            'best_G_benchmark': (-objectives[best_idx]) if self.problem.mode == 'benchmark' else None,
+            'best_G_benchmark': (-objectives[best_idx]) if self.problem.mode == 'benchmark' else self.calculate_fixed_scalar_fitness(objectives[best_idx]),
             'best_fitness': self.calculate_fixed_scalar_fitness(objectives[best_idx]),
             'avg_fitness': np.mean([self.calculate_fixed_scalar_fitness(objectives[i]) for i in range(len(self.population))]),
             'std_fitness': np.std([self.calculate_fixed_scalar_fitness(objectives[i]) for i in range(len(self.population))]),
@@ -578,6 +627,9 @@ class GeneticAlgorithm:
         - Replace population
         """
         
+        geno_div, pheno_div, prior_div = self.calculate_diversity()
+        self.adapt_mutation_rate(geno_div)
+        
         # Elitism: sort by scalar fitness (minimization)
         self.population.sort(key=lambda x: x.scalar_fitness)
         offspring = [ind.copy() for ind in self.population[:self.elitism]]
@@ -590,8 +642,18 @@ class GeneticAlgorithm:
             child1 = parent1.copy()
             child2 = parent2.copy()
             
-            if self.rng.rand() < self.cx_pb:
-                child1, child2 = self.apply_crossover(parent1, parent2)
+            if self.rng.rand() < self.cx_pb_tour:
+                child1 = parent1.copy()
+                child2 = parent2.copy()
+                for k in range(self.problem.num_robots):
+                    child1.tours[k], child2.tours[k] = self.crossover_ox(parent1.tours[k], parent2.tours[k])
+                child1.repair()
+                child2.repair()
+                
+            if self.rng.rand() < self.cx_pb_pack:
+                child1 = parent1.copy()
+                child2 = parent2.copy()
+                child1.item_assignment, child2.item_assignment = self.crossover_uniform(parent1.item_assignment, parent2.item_assignment)
                 child1.repair()
                 child2.repair()
             
@@ -623,6 +685,9 @@ class GeneticAlgorithm:
             'objective_weights': self.objective_weights.tolist(),
             'reference_point': self.reference_point.tolist(),
             'nadir_point': self.nadir_point.tolist(),
+            'best_individual': self.best_individual.to_dict() if self.best_individual is not None else None,
+            'best_fitness': float(self.best_fitness),
+            'best_found_at_gen': int(self.best_found_at_gen),
         }
         os.makedirs(os.path.dirname(filename) or '.', exist_ok=True)
         with open(filename, 'wb') as f:
@@ -653,7 +718,11 @@ class GeneticAlgorithm:
             if 'reference_point' in state:
                 self.reference_point = np.array(state['reference_point'])
             if 'nadir_point' in state:
-                self.nadir_point = np.array(state['nadir_point'])
+                self.nadir_point = np.array(state['nadir_point'])  
+            if state.get('best_individual') is not None:
+                self.best_individual = Individual.from_dict(self.problem, state['best_individual'])
+            self.best_fitness = float(state.get('best_fitness', np.inf))
+            self.best_found_at_gen = int(  state.get('best_found_at_gen', 0))
             
             return True
         
@@ -685,6 +754,7 @@ class GeneticAlgorithm:
             # Initialize new run
             self.initialize_population()
             self.evaluate_population()
+            self.update_best_individual()
             self.record_metrics(0, 0)
             start_gen = 1
             if checkpoint_file:
@@ -692,6 +762,8 @@ class GeneticAlgorithm:
         
         # Evolution loop
         for gen in range(start_gen, self.generations + 1):
+            self.current_gen = gen
+            
             # Adapt weights based on progress
             self.adapt_weights(gen)
             
@@ -701,11 +773,11 @@ class GeneticAlgorithm:
             # Evolve one generation
             self.evolve_generation()
             self.evaluate_population()
+            self.update_best_individual()
             
             # Record metrics
             elapsed = time.time() - start_time
             self.record_metrics(gen, elapsed)
-            self.current_gen = gen
             
             # Save checkpoint
             if checkpoint_file and gen % checkpoint_interval == 0:
@@ -714,12 +786,15 @@ class GeneticAlgorithm:
             # Print progress
             if gen == 1 or gen % 50 == 0 or gen == self.generations:
                 m = self.metrics[-1]
-                print(f"Gen {gen} - Best Fitness: {m['best_fitness']:.4f}")
+                if self.problem.mode == 'benchmark':
+                    print(f"Gen {gen} - Best Fitness: {-m['best_fitness']:.4f}")
+                else:
+                    print(f"Gen {gen} - Best Fitness: {m['best_fitness']:.4f}")
         
         # Final checkpoint
         if checkpoint_file:
             self.save_checkpoint(checkpoint_file)
-    
+                
     def save_metrics(self, filename):
         # Save metrics to CSV
         os.makedirs(os.path.dirname(filename) or '.', exist_ok=True)

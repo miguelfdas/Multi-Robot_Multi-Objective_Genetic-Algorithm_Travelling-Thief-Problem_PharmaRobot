@@ -2,6 +2,7 @@ import pandas as pd
 import os
 import json
 from ttp_problem import create_ttp_instance, load_ttp_benchmark
+from S5_baseline import run_s5
 from ga import GeneticAlgorithm
 
 def load_progress(progress_file):
@@ -24,8 +25,67 @@ def run_single_experiment(seed, problem, params, metrics_file, checkpoint_file):
     # Save metrics
     ga.save_metrics(metrics_file)
         
+def summary(completed_runs, mode, ttp_file=None, best_s5=None):
+    summary_rows = []
+    for run_id in sorted(completed_runs):
+        if mode == 'benchmark':
+            mf = f'results/run_{run_id:02d}_{mode}_{ttp_file}_metrics.csv'
+        else:
+            mf = f'results/run_{run_id:02d}_{mode}_metrics.csv'
+
+        if not os.path.exists(mf):
+            continue
+
+        df = pd.read_csv(mf)
+        if df.empty:
+            continue
+
+        last  = df.iloc[-1] # final-generation values
+        row = {
+            'run_id': run_id,
+            'best_G_benchmark': last.get('best_G_benchmark', float('nan')),
+            'best_tct': last.get('best_tct', float('nan')),
+            'best_Makespan': last.get('best_Makespan', float('nan')),
+            'best_profit': last.get('best_profit', float('nan')),
+            'hypervolume': last.get('hypervolume', float('nan')),
+            'mean_genotypic_diversity': df['genotypic_diversity'].mean()  if 'genotypic_diversity'  in df.columns else float('nan'),
+            'mean_phenotypic_diversity': df['phenotypic_diversity'].mean() if 'phenotypic_diversity' in df.columns else float('nan'),
+            'elapsed_minutes': last.get('elapsed_time_seconds', float('nan')) / 60.0,
+        }
+        summary_rows.append(row)
+
+    if summary_rows:
+        summary_df   = pd.DataFrame(summary_rows)
+
+        agg = {
+            'mode':  mode,
+            'n_runs': len(summary_df),
+            'best_S5': best_s5 if best_s5 is not None else float('nan'),
+        }
+        
+        col_rename = {
+            'best_G_benchmark': 'mean_best_G_benchmark',
+            'best_tct': 'mean_best_tct',
+            'best_Makespan': 'mean_best_Makespan',
+            'best_profit': 'mean_best_profit',
+            'hypervolume': 'mean_hypervolume',
+            'mean_genotypic_diversity': 'mean_genotypic_diversity',
+            'mean_phenotypic_diversity': 'mean_phenotypic_diversity',
+            'elapsed_minutes': 'mean_elapsed_minutes',
+        }
+        
+        for src, dst in col_rename.items():
+            agg[dst] = summary_df[src].mean() if src in summary_df.columns else float('nan')
+
+        summary_out = pd.DataFrame([agg])
+        if mode == 'benchmark':
+            summary_file = f'results/summary_{mode}_{ttp_file}.csv'
+        else:
+            summary_file = f'results/summary_{mode}.csv'
+        summary_out.to_csv(summary_file, index=False)
+        
+        
 def main():
-    
     mode = 'custom' # 'benchmark' or 'custom'
     
     # Configuration
@@ -43,10 +103,28 @@ def main():
     completed_runs = set(progress['completed_runs'])
     
     if mode == 'benchmark':
-        ttp_file = 'kroA100_n990_uncorr_01.ttp'
-        file = f"Instances/{ttp_file}" 
+        # https://cs.adelaide.edu.au/~optlog/CEC2014COMP_InstancesNew/
+        # Easy: eil51_n50_bounded-strongly-corr_01.ttp best known solution: 8200, good solutions: 4000, aceptable solutions: 2000
+        # Medium: a280_n279_uncorr-similar-weights_05.ttp
+        # Hard: kroA100_n990_uncorr_01.ttp or pr1002_n1001_uncorr_10.ttp
+        ttp_file = 'eil51_n50_bounded-strongly-corr_01.ttp'        
+        file = f"Instances/{ttp_file}"
+        
+        if os.path.exists(f'results/{ttp_file}_S5_best_fitness.txt'):
+            with open(f'results/{ttp_file}_S5_best_fitness.txt', 'r') as f:
+                best_s5_fitness = float(f.read().strip())
+            print(f"S5 best fitness (G): {best_s5_fitness:.2f}")
+        else:
+            time_budget_seconds = 600 # 10 minutes        
+            print(f"Running S5 baseline on {ttp_file} for {time_budget_seconds/60} minutes")
+            best_s5_ind = run_s5(filepath=file, time_budget_seconds=time_budget_seconds, seed=42,)
+            best_s5_fitness = -best_s5_ind.fitness  # G value (higher is better)
+            print(f"S5 best fitness (G): {best_s5_fitness:.2f}")
+            with open(f'results/{ttp_file}_S5_best_fitness.txt', 'w') as f:
+                f.write(f"{best_s5_fitness:.2f}\n")
         problem = load_ttp_benchmark(file, mode=mode, seed=base_seed)
     else:
+        best_s5_fitness = None
         # Create problem instance
         # Multi-robot Multi-objective TTP instance
         problem = create_ttp_instance(num_robots=num_robots, mode=mode, seed=base_seed)
@@ -55,7 +133,8 @@ def main():
     params = {
         'pop_size': 100,
         'generations': 500,
-        'cx_pb': 0.8,
+        'cx_pb_tour': 0.8,
+        'cx_pb_pack': 0.8,
         'mut_pb_tour': 0.2,
         'mut_pb_pack': 0.002,
         'tournament_size': 3,
@@ -93,6 +172,7 @@ def main():
                     'generations': last_row['generation']
                 }
                 results.append(result)
+                continue
         
         print(f"Running experiment {run_id+1}")
         # Run experiment
@@ -104,6 +184,8 @@ def main():
         progress['completed_runs'] = sorted(list(completed_runs))
         progress['last_run'] = run_id
         save_progress(progress_file, progress)
+        
+    summary(completed_runs, mode, ttp_file if mode == 'benchmark' else None, best_s5=best_s5_fitness)
 
 if __name__ == "__main__":
     main()

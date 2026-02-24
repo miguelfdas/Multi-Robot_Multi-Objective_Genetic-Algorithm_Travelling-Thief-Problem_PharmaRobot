@@ -1,0 +1,2 @@
+mode,n_runs,best_S5,mean_best_G_benchmark,mean_best_tct,mean_best_Makespan,mean_best_profit,mean_hypervolume,mean_genotypic_diversity,mean_phenotypic_diversity,mean_elapsed_minutes
+custom,30,,0.020394476785732172,137.08399577977104,6265.636741737218,-3591.733333333333,3482862451545.3374,0.013971088126776698,0.015508737609982996,3.349738483031591

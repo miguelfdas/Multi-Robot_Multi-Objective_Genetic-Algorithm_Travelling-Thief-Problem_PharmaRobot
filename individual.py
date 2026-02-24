@@ -311,7 +311,7 @@ class Individual:
         """
         Evaluates using the standard TTP formula (single-robot, single-objective).
         G = total_profit - renting_ratio x total_travel_time
-        Bonyadi et al. (2013) — original TTP formula.
+        Bonyadi et al. (2013) - original TTP formula.
         """
         
         total_profit = 0.0
@@ -344,7 +344,8 @@ class Individual:
     def evaluate(self):
         if self.problem.mode == 'benchmark':
             G = self.evaluate_standard_ttp()
-            self.fitness = - G # Negative because GA minimizes fitness
+            self.fitness = - G # Negative because GA minimizes fitness        
+            self.scalar_fitness = self.fitness
         else:
             self.fitness = self.evaluate_fitness()
         return self.fitness
@@ -355,6 +356,7 @@ class Individual:
         new_assignment = self.item_assignment.copy()
         new_ind = Individual(self.problem, new_tours, new_assignment)
         new_ind.fitness = self.fitness
+        new_ind.scalar_fitness = self.scalar_fitness
         return new_ind
     
     def to_dict(self):
