@@ -43,10 +43,11 @@ def summary(completed_runs, mode, ttp_file=None, best_s5=None):
         last  = df.iloc[-1] # final-generation values
         row = {
             'run_id': run_id,
-            'best_G_benchmark': last.get('best_G_benchmark', float('nan')),
+            'best_G': last.get('best_G', float('nan')),
             'best_tct': last.get('best_tct', float('nan')),
             'best_Makespan': last.get('best_Makespan', float('nan')),
             'best_profit': last.get('best_profit', float('nan')),
+            'best_imbalance': last.get('best_imbalance', float('nan')),
             'hypervolume': last.get('hypervolume', float('nan')),
             'mean_genotypic_diversity': df['genotypic_diversity'].mean()  if 'genotypic_diversity'  in df.columns else float('nan'),
             'mean_phenotypic_diversity': df['phenotypic_diversity'].mean() if 'phenotypic_diversity' in df.columns else float('nan'),
@@ -64,10 +65,11 @@ def summary(completed_runs, mode, ttp_file=None, best_s5=None):
         }
         
         col_rename = {
-            'best_G_benchmark': 'mean_best_G_benchmark',
+            'best_G': 'mean_best_G',
             'best_tct': 'mean_best_tct',
             'best_Makespan': 'mean_best_Makespan',
             'best_profit': 'mean_best_profit',
+            'best_imbalance': 'mean_best_imbalance',
             'hypervolume': 'mean_hypervolume',
             'mean_genotypic_diversity': 'mean_genotypic_diversity',
             'mean_phenotypic_diversity': 'mean_phenotypic_diversity',
@@ -136,8 +138,8 @@ def main():
         'cx_pb_tour': 0.8,
         'cx_pb_pack': 0.8,
         'mut_pb_tour': 0.2,
-        'mut_pb_pack': 0.002,
-        'tournament_size': 3,
+        'mut_pb_pack': 0.02,
+        'tournament_size': 2,
         'elitism': 2,
         'n_jobs': -1 # Use all available CPU cores for parallel evaluation
     }
@@ -163,9 +165,10 @@ def main():
                 result = {
                     'run_id': run_id,
                     'seed': base_seed + run_id,
-                    'best_tct':            None if is_benchmark else last_row.get('best_tct'),
-                    'best_Makespan':       None if is_benchmark else last_row.get('best_Makespan'),
-                    'best_profit':         None if is_benchmark else last_row.get('best_profit'),
+                    'best_G': last_row.get('best_G'),
+                    'best_tct': None if is_benchmark else last_row.get('best_tct'),
+                    'best_Makespan': None if is_benchmark else last_row.get('best_Makespan'),
+                    'best_profit': None if is_benchmark else last_row.get('best_profit'),
                     'best_scalar_fitness': None if is_benchmark else last_row.get('best_fitness'),
                     'final_diversity': last_row['genotypic_diversity'],
                     'total_time_seconds': last_row['elapsed_time_seconds'],

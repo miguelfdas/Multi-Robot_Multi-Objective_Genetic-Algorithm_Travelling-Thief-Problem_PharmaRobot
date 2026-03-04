@@ -8,7 +8,7 @@ Multi-Objective Weighted Tchebycheff Aggregation:
 
 Parent Selection:
 - Tournament Selection [Miller & Goldberg, 1995]
-- Tournament size = 3
+- Tournament size = 2
 
 Crossover:
 
@@ -50,7 +50,7 @@ class GeneticAlgorithm:
     Dynamic weight adjustment (multi-objective)
     """
     
-    def __init__(self, problem, pop_size=100, generations=500, cx_pb_tour=0.8, cx_pb_pack=0.8, mut_pb_tour=0.2, mut_pb_pack=0.002, tournament_size=3, elitism=2, n_jobs=-1, seed=None):
+    def __init__(self, problem, pop_size=100, generations=500, cx_pb_tour=0.8, cx_pb_pack=0.8, mut_pb_tour=0.2, mut_pb_pack=0.02, tournament_size=2, elitism=2, n_jobs=-1, seed=None):
         """
         Initialize Genetic Algorithm.
         
@@ -76,32 +76,34 @@ class GeneticAlgorithm:
         self.n_jobs = n_jobs
         self.seed = seed
         
+        self.num_objectives = 5
+        
         self.population = []
         self.metrics = []
         self.current_gen = 0
         
         # Bounds for adaptive mutation (never go below base / 5 or above base * 5)
         self.mut_tour_base = mut_pb_tour
-        self.mut_pack_base = mut_pb_pack
+        self.mut_pack_base = max(mut_pb_pack, 3.0 / max(problem.num_items, 1))
         self.mut_tour_min  = mut_pb_tour / 5.0
         self.mut_tour_max  = min(mut_pb_tour * 5.0, 1.0)
-        self.mut_pack_min  = mut_pb_pack / 5.0
-        self.mut_pack_max  = min(mut_pb_pack * 5.0, 1.0)
+        self.mut_pack_min  = self.mut_pack_base / 5.0
+        self.mut_pack_max  = min(self.mut_pack_base * 10.0, 1.0)
         
         # Multi-objective weights (adaptive)
         # Initial weights: equal importance to all objectives
-        self.objective_weights = np.array([1.0, 1.0, 1.0])  # [tct, Makespan, profit]
+        self.objective_weights = np.array([1.0, 1.0, 1.0, 1.0, 1.0])  # [tct, Makespan, profit, priority_profit, load_imbalance]
         
         # Reference point (ideal point in objective space)
         # Updated during evolution to track best found values
-        self.reference_point = np.array([np.inf, np.inf, np.inf])
+        self.reference_point = np.array([np.inf, np.inf, np.inf, np.inf, np.inf])
         
         # Nadir point (worst values)
-        self.nadir_point = np.array([-np.inf, -np.inf, -np.inf])
+        self.nadir_point = np.array([-np.inf, -np.inf, -np.inf, -np.inf, -np.inf])
         
         # Hypervolume reference point (worse than any expected solution) for hypervolume calculation
         # Hipervolume is a common multi-objective performance metric that measures the volume of objective space dominated by the Pareto front and bounded by a reference point.
-        self.hv_reference_point = np.array([5000.0, 200000.0, 0.1])
+        self.hv_reference_point = np.array([5000.0, 200000.0, 300000.0, 0.0, 100.0]) # [tct, Makespan, profit, priority_profit, load_imbalance]
         
         self.rng = np.random.RandomState(seed)
         
@@ -121,8 +123,8 @@ class GeneticAlgorithm:
         - z_nad_i = nadir point (worst value found)
         """
         
-        normalized = np.zeros(3)
-        for i in range(3):
+        normalized = np.zeros(self.num_objectives)
+        for i in range(self.num_objectives):
             range_i = self.nadir_point[i] - self.reference_point[i]
             if range_i > 1e-10:
                 normalized[i] = (objectives[i] - self.reference_point[i]) / range_i
@@ -149,13 +151,13 @@ class GeneticAlgorithm:
     
     def calculate_fixed_scalar_fitness(self, objectives):
         """
-        Scalar fitness with fixed weights [1/3, 1/3, 1/3] for logging
+        Scalar fitness with fixed weights [1/5, 1/5, 1/5, 1/5, 1/5] for all objectives, for logging
         It is not affected by weight adaptation, allowing consistent comparison between generations
         """  
         if self.problem.mode == 'benchmark':
             return objectives
         else:  
-            fixed_weights = np.array([1/3, 1/3, 1/3])
+            fixed_weights = np.array([1/5, 1/5, 1/5, 1/5, 1/5])
             norm_obj = self.normalize_objectives(objectives)
             weighted_distances = fixed_weights * norm_obj
             return np.max(weighted_distances)
@@ -189,7 +191,7 @@ class GeneticAlgorithm:
         Adapt objective weights during evolution to better exploration and trade-offs
         
         Early generations: Emphasize Makespan and tct
-        Later generations: Emphasize profit
+        Later generations: Emphasize profit and imbalance
         """
         
         if not self.problem.mode == 'benchmark':
@@ -198,14 +200,16 @@ class GeneticAlgorithm:
             
             # Adaptive weighting schedule:
             
-            # Early: [0.4, 0.4, 0.2] - focus on tct and Makespan
-            # Late:  [0.3, 0.3, 0.4] - focus on profit
+            # Early: [0.25, 0.25, 0.3, 0.1, 0.1] - focus on Makespan and tct
+            # Late:  [0.1, 0.1, 0.3, 0.25, 0.25] - focus on profit and priority_profit
             
-            w_tct = 0.4 - 0.1 * progress # 0.4 -> 0.3
-            w_Makespan = 0.4 - 0.1 * progress # 0.4 -> 0.3
-            w_profit = 0.2 + 0.2 * progress # 0.2 -> 0.4
+            w_tct = 0.25 * (1 - progress) + 0.1 * progress # decrease from 0.25 to 0.1
+            w_Makespan = 0.25 * (1 - progress) + 0.1 * progress # decrease from 0.25 to 0.1
+            w_G = 0.3
+            w_profit = 0.1 * (1 - progress) + 0.25 * progress # increase from 0.1 to 0.25
+            w_imbalance = 0.1 * (1 - progress) + 0.25 * progress # increase from 0.1 to 0.25
             
-            self.objective_weights = np.array([w_tct, w_Makespan, w_profit])
+            self.objective_weights = np.array([w_tct, w_Makespan, w_G, w_profit, w_imbalance])
         else:
             return
         
@@ -239,7 +243,7 @@ class GeneticAlgorithm:
         - Scalar fitness computed via Tchebycheff aggregation
         """
         
-        # Evaluation of multi-objective fitness
+        # Evaluation of multi-objective fitness            
         fitness_results = Parallel(n_jobs=self.n_jobs)(delayed(ind.evaluate)() for ind in self.population)
         for ind, fit in zip(self.population, fitness_results):
             ind.fitness = fit
@@ -279,7 +283,7 @@ class GeneticAlgorithm:
         size = len(parent1_tour)
         
         # Select two crossover points (exclude position 0, origin) and ensure they are different      
-        point1, point2 = sorted(self.rng.randint(1, size, size=2))
+        point1, point2 = sorted(self.rng.choice(range(1, size), size=2, replace=False))
         if point1 == point2:
             point2 = point1 + 1
             if point2 >= size:
@@ -341,6 +345,8 @@ class GeneticAlgorithm:
     def mutate_swap(self, tour):
         """
         2-opt Swap Mutation for tours
+
+        Selects two positions and reverses the segment between them to reduce route crossings and improve tour quality.
 
         With probability mut_pb_tour:
         - Select two random positions (excluding origin)
@@ -404,42 +410,125 @@ class GeneticAlgorithm:
     
     def calculate_diversity(self):
         """
-        Calculate population diversity metrics.
-        
-        - Genotypic: Hamming distance in item assignments
-        - Phenotypic: Standard deviation in fitness values
+        Calculate population diversity.
+
+        Genotypic diversity:
+            - Measures structural differences in chromosomes
+            - Combines:
+                - Pairwise Hamming distance on item_assignment vectors.
+                - Pairwise Jaccard edge-disagreement on tours.
+            Both components live in [0, 1]
+
+        Phenotypic diversity:
+            - Behavioural diversity in the solution space
+            - Combines:
+                - Binary Shannon entropy of tour-edge usage frequencies.
+                - Binary Shannon entropy of item-selection frequencies.
+            Both components live in [0, 1]
+
+        Priority diversity:
+            Measures whether individuals differ in their tendency to select prioritys.
+            Mean per-bin standard deviation of priority-fraction distributions. 
         """
-        
+
         if len(self.population) < 2:
             return 0.0, 0.0, 0.0
-        
-        # Genotypic diversity: Hamming distance in assignments
+
+        n_inds = len(self.population)
+
+        # Item assignment matrix  (n_inds × n_items)
         assignments = np.array([ind.item_assignment for ind in self.population])
-        n_samples = min(50, len(self.population) // 2)
-        
-        indices = [self.rng.choice(len(self.population), size=2, replace=False) for _ in range(n_samples)]
-        hamming_dists = [np.mean(assignments[i] != assignments[j]) for i, j in indices]
-        genotypic = np.mean(hamming_dists)
-        
-        # Phenotypic diversity: Fitness standard deviation
-        fitnesses = np.array([ind.scalar_fitness for ind in self.population])
-        phenotypic = np.std(fitnesses)
-        
-        # Priority diversity: Distribution of priorities in selected items
-        priority_distributions = []
+
+        # Per-individual edge sets  (list of sets, one per individual)
+        # Edges are undirected: stored as (min(u,v), max(u,v))
+        individual_edge_sets = []
         for ind in self.population:
-            selected = ind.item_assignment >= 0
-            if np.any(selected):
-                priorities = self.problem.items[selected, 3]
-                dist = np.bincount(priorities.astype(int), minlength=4)[1:]  # [1,2,3]
-                dist = dist / (dist.sum() + 1e-10)
-                priority_distributions.append(dist)
-        
-        if priority_distributions:
-            priority_div = np.std(priority_distributions)
+            edges = set()
+            for tour in ind.tours:
+                tour_len = len(tour)
+                for pos in range(tour_len):
+                    u = tour[pos]
+                    v = tour[(pos + 1) % tour_len]
+                    edges.add((min(u, v), max(u, v)))
+            individual_edge_sets.append(edges)
+
+        # Genotypic diversity
+        n_samples = len(self.population) // 2
+        sampled_pairs = [self.rng.choice(n_inds, size=2, replace=False) for _ in range(n_samples)]
+
+        pair_distances = []
+        for idx_i, idx_j in sampled_pairs:
+
+            # Packing component: normalised Hamming on item_assignment
+            hamming_pack = float(np.mean(assignments[idx_i] != assignments[idx_j]))
+
+            # Routing component: Jaccard distance on tour-edge sets
+            #   = 1 - |intersection| / |union|
+            #   = 0 when tours are identical, 1 when completely different
+            edges_i = individual_edge_sets[idx_i]
+            edges_j = individual_edge_sets[idx_j]
+            union_size = len(edges_i | edges_j)
+            inter_size = len(edges_i & edges_j)
+            hamming_tour = 1.0 - inter_size / union_size if union_size > 0 else 0.0
+
+            pair_distances.append(0.5 * hamming_pack + 0.5 * hamming_tour)
+
+        genotypic = float(np.mean(pair_distances))
+
+        # Phenotypic diversity
+
+        # Tour edge entropy
+        edge_counts: dict = {}
+        for edge_set in individual_edge_sets:
+            for edge in edge_set:
+                edge_counts[edge] = edge_counts.get(edge, 0) + 1
+
+        if edge_counts:
+            fracs_tour = np.array(list(edge_counts.values()), dtype=float) / n_inds
+            mask_tour = (fracs_tour > 1e-10) & (fracs_tour < 1.0 - 1e-10)
+            if np.any(mask_tour):
+                f = fracs_tour[mask_tour]
+                entropy_tour = -f * np.log2(f) - (1.0 - f) * np.log2(1.0 - f)
+                tour_diversity = float(np.mean(entropy_tour))
+            else:
+                tour_diversity = 0.0 # all edges unanimous → population has converged
         else:
+            tour_diversity = 0.0
+
+        # Item selection entropy
+        frac_picked = np.mean(assignments >= 0, axis=0) # shape (n_items,)
+        mask_item = (frac_picked > 1e-10) & (frac_picked < 1.0 - 1e-10)
+        item_entropy = np.zeros(self.problem.num_items)
+        item_entropy[mask_item] = (
+            - frac_picked[mask_item] * np.log2(frac_picked[mask_item])
+            - (1.0 - frac_picked[mask_item]) * np.log2(1.0 - frac_picked[mask_item])
+        )
+        item_diversity = float(np.mean(item_entropy))
+
+        phenotypic = 0.5 * tour_diversity + 0.5 * item_diversity
+
+        if self.problem.mode == 'benchmark':
+            # All benchmark items share priority = 1; metric is identically 0.
             priority_div = 0.0
-        
+        else:
+            priority_distributions = []
+            for ind in self.population:
+                selected = ind.item_assignment >= 0
+                if np.any(selected):
+                    priorities = self.problem.items[selected, 3]
+                    dist = np.bincount(
+                        priorities.astype(int), minlength=4
+                    )[1:].astype(float)          # bins for priorities 1, 2, 3
+                    dist /= dist.sum() + 1e-10
+                    priority_distributions.append(dist)
+
+            if len(priority_distributions) >= 2:
+                priority_distributions = np.array(priority_distributions)   # (N, 3)
+                raw = float(np.mean(np.std(priority_distributions, axis=0, ddof=1)))
+                priority_div = max(0.0, raw)   # clip fp residual to zero
+            else:
+                priority_div = 0.0
+
         return genotypic, phenotypic, priority_div
     
     def update_best_individual(self):
@@ -507,60 +596,58 @@ class GeneticAlgorithm:
         
         return objectives_array[~is_dominated]
 
-    def compute_hypervolume(self, pareto_front, reference_point_hv):
-        if len(pareto_front) == 0:
-            return 0.0
-        
-        valid = np.all(pareto_front < reference_point_hv, axis=1)
-        front = pareto_front[valid]
-        
-        if len(front) == 0:
-            return 0.0
-        
-        sorted_idx = np.argsort(front[:, 2])
-        front = front[sorted_idx]
-        
-        hv = 0.0
-        prev_f3 = reference_point_hv[2]
-        
-        for k in range(len(front) - 1, -1, -1):
-            slice_height = prev_f3 - front[k, 2]
-            
-            slice_points = front[:k+1, :2]
-            area_2d = self.compute_hypervolume_2d(
-                slice_points, 
-                reference_point_hv[:2]
-            )
-            
-            hv += area_2d * slice_height
-            prev_f3 = front[k, 2]
-        
-        return hv
+    def compute_hypervolume_nd(self, points: np.ndarray, ref: np.ndarray) -> float:
+        """
+        Exact hypervolume for n-dimensional objective spaces.
 
-    def compute_hypervolume_2d(self, points, ref):
+        Implements the HSO (Hypervolume by Slicing Objectives) algorithm recursively (Zitzler & Thiele, 1998; While et al., 2012).
+
+        HV_n(S, r) = Σ_k  HV_{n-1}(S_k, r[:-1]) × (prev_last − s_k[−1])
+        """
         if len(points) == 0:
             return 0.0
-        
-        valid = (points[:, 0] < ref[0]) & (points[:, 1] < ref[1])
-        pts = points[valid]
-        
+
+        n_dims = points.shape[1]
+
+        # Keep only points that strictly dominate ref in ALL objectives
+        dominated_mask = np.all(points < ref, axis=1)
+        pts = points[dominated_mask]
         if len(pts) == 0:
             return 0.0
-        
-        sorted_idx = np.argsort(pts[:, 0])
-        pts = pts[sorted_idx]
-        
-        area = 0.0
-        current_f2 = ref[1]
-        
-        for p in pts:
-            if p[1] < current_f2:
-                area += (ref[0] - p[0]) * (current_f2 - p[1])
-                current_f2 = p[1]
-        
-        return area
+
+        # Base case 1-D
+        if n_dims == 1:
+            return float(ref[0] - pts[:, 0].min())
+
+        # Base case 2-D: standard sweep-line
+        if n_dims == 2:
+            idx = np.argsort(pts[:, 0])
+            pts = pts[idx]
+            area = 0.0
+            current_f2 = ref[1]
+            for p in pts:
+                if p[1] < current_f2:
+                    area += (ref[0] - p[0]) * (current_f2 - p[1])
+                    current_f2 = p[1]
+            return area
+
+        # Recursive n-D: slice along the last objective
+        idx = np.argsort(pts[:, -1])
+        pts = pts[idx]
+
+        hv = 0.0
+        prev_last = ref[-1]
+
+        for k in range(len(pts) - 1, -1, -1):
+            slab_height = prev_last - pts[k, -1]   # ≥ 0
+            if slab_height > 0:
+                # Recurse on the (n-1)-D projection of all points up to index k
+                hv += self.compute_hypervolume_nd(pts[:k + 1, :-1], ref[:-1]) * slab_height
+            prev_last = pts[k, -1]
+
+        return hv
     
-    def record_metrics(self, generation, elapsed):
+    def record_metrics(self, generation, elapsed, geno_div, pheno_div, prior_div):
         """
         Record metrics in each generation.
         """
@@ -568,44 +655,60 @@ class GeneticAlgorithm:
         # Extract fitness values
         scalar_fits = np.array([ind.scalar_fitness for ind in self.population])
         objectives = np.array([ind.fitness for ind in self.population])
-                
-        geno_div, pheno_div, prior_div = self.calculate_diversity()
-        
+                        
         best_idx = np.argmin(scalar_fits)
                         
         if not self.problem.mode == 'benchmark':
             # Pareto front
             pareto_front = self.compute_pareto_front(objectives)
+            
+            # Normalise Pareto front to [0, 1] using current ideal/nadir, then compute HV with a fixed reference point of [1.1, 1.1, 1.1].
+            norm_front = np.zeros_like(pareto_front)
+            for i in range(self.num_objectives):
+                r_i = self.nadir_point[i] - self.reference_point[i]
+                if r_i > 1e-10:
+                    norm_front[:, i] = (pareto_front[:, i] - self.reference_point[i]) / r_i
+                else:
+                    norm_front[:, i] = 0.0
+            norm_front = np.clip(norm_front, 0.0, 1.1)
+            hv_ref_norm = np.array([1.1, 1.1, 1.1, 1.1, 1.1])
+
             # Hypervolume
-            hv = self.compute_hypervolume(pareto_front, self.hv_reference_point)
-                
+            hv = self.compute_hypervolume_nd(norm_front, hv_ref_norm)
+        
         # Record metrics
         self.metrics.append({
             'generation': generation,
             
             # Scalar fitness
-            'best_G_benchmark': (-objectives[best_idx]) if self.problem.mode == 'benchmark' else self.calculate_fixed_scalar_fitness(objectives[best_idx]),
             'best_fitness': self.calculate_fixed_scalar_fitness(objectives[best_idx]),
             'avg_fitness': np.mean([self.calculate_fixed_scalar_fitness(objectives[i]) for i in range(len(self.population))]),
             'std_fitness': np.std([self.calculate_fixed_scalar_fitness(objectives[i]) for i in range(len(self.population))]),
             
             # Individual objectives (best individual)
-            'best_tct': 0 if self.problem.mode == 'benchmark' else objectives[best_idx, 0],
-            'best_Makespan': 0 if self.problem.mode == 'benchmark' else objectives[best_idx, 1],
-            'best_profit': 0 if self.problem.mode == 'benchmark' else objectives[best_idx, 2],
+                        
+            'best_G': -self.best_fitness if self.problem.mode == 'benchmark' else -objectives[best_idx, 2],
+            'best_tct': np.nan if self.problem.mode == 'benchmark' else objectives[best_idx, 0],
+            'best_Makespan': np.nan if self.problem.mode == 'benchmark' else objectives[best_idx, 1],
+            'best_profit': np.nan if self.problem.mode == 'benchmark' else objectives[best_idx, 3],
+            'best_imbalance': np.nan if self.problem.mode == 'benchmark' else objectives[best_idx, 4],
             
             # Multi-objective tracking
-            'ideal_tct': 0 if self.problem.mode == 'benchmark' else self.reference_point[0],
-            'ideal_Makespan': 0 if self.problem.mode == 'benchmark' else self.reference_point[1],
-            'ideal_profit': 0 if self.problem.mode == 'benchmark' else self.reference_point[2],
+            'ideal_G': np.nan if self.problem.mode == 'benchmark' else -self.reference_point[2],
+            'ideal_tct': np.nan if self.problem.mode == 'benchmark' else self.reference_point[0],
+            'ideal_Makespan': np.nan if self.problem.mode == 'benchmark' else self.reference_point[1],
+            'ideal_profit': np.nan if self.problem.mode == 'benchmark' else self.reference_point[3],
+            'ideal_imbalance': np.nan if self.problem.mode == 'benchmark' else self.reference_point[4],
             
             # Weights
-            'weight_travel': 0 if self.problem.mode == 'benchmark' else self.objective_weights[0],
-            'weight_Makespan': 0 if self.problem.mode == 'benchmark' else self.objective_weights[1],
-            'weight_profit': 0 if self.problem.mode == 'benchmark' else self.objective_weights[2],
+            'weight_G': np.nan if self.problem.mode == 'benchmark' else self.objective_weights[2],
+            'weight_travel': np.nan if self.problem.mode == 'benchmark' else self.objective_weights[0],
+            'weight_Makespan': np.nan if self.problem.mode == 'benchmark' else self.objective_weights[1],
+            'weight_profit': np.nan if self.problem.mode == 'benchmark' else self.objective_weights[3],
+            'weight_imbalance': np.nan if self.problem.mode == 'benchmark' else self.objective_weights[4],
             
-            'hypervolume': 0 if self.problem.mode == 'benchmark' else hv,
-            'pareto_front_size': 0 if self.problem.mode == 'benchmark' else len(pareto_front),
+            'hypervolume': np.nan if self.problem.mode == 'benchmark' else hv,
+            'pareto_front_size': np.nan if self.problem.mode == 'benchmark' else len(pareto_front),
             
             # Diversity
             'genotypic_diversity': geno_div,
@@ -641,19 +744,17 @@ class GeneticAlgorithm:
                         
             child1 = parent1.copy()
             child2 = parent2.copy()
-            
+
             if self.rng.rand() < self.cx_pb_tour:
-                child1 = parent1.copy()
-                child2 = parent2.copy()
                 for k in range(self.problem.num_robots):
                     child1.tours[k], child2.tours[k] = self.crossover_ox(parent1.tours[k], parent2.tours[k])
                 child1.repair()
                 child2.repair()
-                
+
             if self.rng.rand() < self.cx_pb_pack:
-                child1 = parent1.copy()
-                child2 = parent2.copy()
-                child1.item_assignment, child2.item_assignment = self.crossover_uniform(parent1.item_assignment, parent2.item_assignment)
+                a1, a2 = self.crossover_uniform(child1.item_assignment, child2.item_assignment)
+                child1.item_assignment = a1
+                child2.item_assignment = a2
                 child1.repair()
                 child2.repair()
             
@@ -670,6 +771,8 @@ class GeneticAlgorithm:
                 offspring.append(child2)
         
         self.population = offspring[:self.pop_size]
+        
+        return geno_div, pheno_div, prior_div
     
     def save_checkpoint(self, filename):
         """
@@ -755,7 +858,8 @@ class GeneticAlgorithm:
             self.initialize_population()
             self.evaluate_population()
             self.update_best_individual()
-            self.record_metrics(0, 0)
+            geno_div, pheno_div, prior_div = self.calculate_diversity()
+            self.record_metrics(0, 0, geno_div, pheno_div, prior_div)
             start_gen = 1
             if checkpoint_file:
                 self.save_checkpoint(checkpoint_file)
@@ -771,13 +875,13 @@ class GeneticAlgorithm:
                 ind.scalar_fitness = self.calculate_scalar_fitness(ind.fitness)
             
             # Evolve one generation
-            self.evolve_generation()
+            geno_div, pheno_div, prior_div = self.evolve_generation()
             self.evaluate_population()
             self.update_best_individual()
             
             # Record metrics
             elapsed = time.time() - start_time
-            self.record_metrics(gen, elapsed)
+            self.record_metrics(gen, elapsed, geno_div, pheno_div, prior_div)
             
             # Save checkpoint
             if checkpoint_file and gen % checkpoint_interval == 0:

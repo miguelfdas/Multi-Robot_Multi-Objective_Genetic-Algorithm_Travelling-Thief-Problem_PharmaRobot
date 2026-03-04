@@ -1,2 +1,2 @@
-mode,n_runs,best_S5,mean_best_G_benchmark,mean_best_tct,mean_best_Makespan,mean_best_profit,mean_hypervolume,mean_genotypic_diversity,mean_phenotypic_diversity,mean_elapsed_minutes
-custom,30,,0.020394476785732172,137.08399577977104,6265.636741737218,-3591.733333333333,3482862451545.3374,0.013971088126776698,0.015508737609982996,3.349738483031591
+mode,n_runs,best_S5,mean_best_G,mean_best_tct,mean_best_Makespan,mean_best_profit,mean_best_imbalance,mean_hypervolume,mean_genotypic_diversity,mean_phenotypic_diversity,mean_elapsed_minutes
+custom,30,,-4876.867547266497,148.30522828968952,6744.334213933164,-3532.9,1.2502179514169123,1.3708863180575943,0.46895137681768495,0.2224397880510099,3.471294248633915

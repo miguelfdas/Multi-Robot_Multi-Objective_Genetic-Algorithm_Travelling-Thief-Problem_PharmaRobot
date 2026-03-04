@@ -19,24 +19,6 @@ Individual = {
     'item_assignment': [assignment for each item] == [-1, 0, 1, 0, -1, 2, ...]
 }
 
-Multi-objective fitness evaluation:
-
-Task Completion Time (minimize):
-- Makespan / items_delivered
-
-Makespan (minimize):
-- Sum of all robots travel costs:
-- travel costs = time_k x renting_ratio
-- time_k = Sum of edges [distance / speed(weight)]
-- Speed decreases with weight
-
-Weighted Profit X Priorities (minimize):
-- f2 = -Σ(collected items) [profit x priority]
-- Priority weighting:
-    - Priority 1 (High Urgency): weight = 2.0
-    - Priority 2 (Medium Urgency): weight = 1.0
-    - Priority 3 (Low Urgency): weight = 0.5
-
 [1] Davis, L. (1985).
     "Applying adaptive algorithms to epistatic domains."
     IJCAI, 162-164.
@@ -126,7 +108,7 @@ class Individual:
         for i in range(problem.num_items):
             city = int(problem.items[i, 0])
             robot_id = city_to_robot.get(city, -1)
-            if robot_id >= 0 and rng.random() < 0.3:  # 30% chance of picking item
+            if robot_id >= 0 and rng.random() < 0.8:  # 80% chance of picking item
                 item_assignment[i] = robot_id
         
         ind = cls(problem, tours, item_assignment)
@@ -244,68 +226,104 @@ class Individual:
     
     def evaluate_fitness(self):
         """
-        Evaluate multi-objective fitness.
-        Multi-objective evaluation, dosen't follow the standard TTP formula
-        
-        f1: Task Completion Time (minimize)
-        f2: Makespan (minimize)
-        f3: Maximize Weighted Profit (priorities)
+        5-Objective fitness for custom (multi-robot, multi-objective) mode.
+
+        - f1:
+            - Task Completion Time (TCT) = Makespan / items_delivered [minimize]
+            - Penalises routes that deliver fewer items per unit cost.
+
+        - f2:
+            - Makespan = renting_ratio x Σ_k travel_time_k [minimize]
+            - Sum of all robots travel costs:
+                - travel costs = time_k x renting_ratio
+                - time_k = Sum of edges [distance / speed(weight)]
+                - Speed decreases with weight
+            - Total monetary cost of operating all robots.
+
+        - f3:
+            - -G_TTP = Σ profit  -  renting_ratio x Σ travel_time [maximize G ->  minimize -G]
+            - TTP standard objective
+
+        - f4  
+            - -Weighted Priority Profit = -Σ_{collected items} profit x priority_weight [minimize]
+            - Priority weights:
+                - Priority 1 (High Urgency): weight = 2.0
+                - Priority 2 (Medium Urgency): weight = 1.0
+                - Priority 3 (Low Urgency): weight = 0.5
+            - Drives the packing plan to prefer clinically urgent medications.
+
+        - f5  
+            - Load Imbalance = alpha(Σ_weight per robot) [minimize]
+            - Standard deviation of total weight carried by each robot.
+            - Promotes balanced workload across the fleet.
+
+        References
+        ----------
+        [1] Bonyadi et al. (2013) – original TTP evaluation function.
+        [2] Deb et al. (2002)    – NSGA-II dominance and diversity.
+        [3] Zhang & Li (2007)    – MOEA/D Tchebycheff scalarisation.
         """
 
+        #  Per-robot accumulators
         robot_travel_times = np.zeros(self.num_robots)
-        robot_profits = np.zeros(self.num_robots)
-        
+        robot_priority_profit = np.zeros(self.num_robots)
+        robot_weight_totals = np.zeros(self.num_robots)
+        total_raw_profit = 0.0
+
         for robot_id in range(self.num_robots):
             tour = self.tours[robot_id]
-            
-            # Get items for this robot
-            robot_items = np.where(self.item_assignment == robot_id)[0]
-            
-            # Calculate profit for this robot
-            for item_idx in robot_items:
+            robot_items_idx = np.where(self.item_assignment == robot_id)[0]
+            robot_items_set = set(robot_items_idx)
+
+            priority_weights_map = {1: 2.0, 2: 1.0, 3: 0.5}
+            for item_idx in robot_items_idx:
                 profit = self.problem.items[item_idx, 1]
-                priority = self.problem.items[item_idx, 3]
+                weight = self.problem.items[item_idx, 2]
+                priority = int(self.problem.items[item_idx, 3])
+                pw = priority_weights_map.get(priority, 1.0)
                 
-                # Priority weighting: 1->2.0x, 2->1.0x, 3->0.5x
-                priority_weights = {1: 2.0, 2: 1.0, 3: 0.5}
-                weight = priority_weights.get(int(priority), 1.0)
-                robot_profits[robot_id] += profit * weight
-            
-            # Calculate travel time with speed model
-            travel_time = 0
-            current_weight = 0
-            
+                robot_priority_profit[robot_id] += profit * pw
+                robot_weight_totals[robot_id] += weight
+                total_raw_profit += profit
+
+            travel_time = 0.0
+            current_weight = 0.0
+
             for i in range(len(tour)):
                 current_city = tour[i]
-                
-                # Pick up items at current city
+
+                # Pick up items that belong to this robot at this city
                 for item_idx in self.problem.get_items_at_city(current_city):
-                    if item_idx in robot_items:
+                    if item_idx in robot_items_set:
                         current_weight += self.problem.items[item_idx, 2]
-                
-                # Travel to next city
+
                 next_city = tour[(i + 1) % len(tour)]
                 distance = self.problem.get_distance(current_city, next_city)
-                
-                # Speed decreases with weight
                 weight_ratio = current_weight / self.problem.knapsack_capacity
                 speed = self.problem.calculate_speed(weight_ratio)
                 travel_time += distance / speed
-            
+
             robot_travel_times[robot_id] = travel_time
-            
+
         total_items_delivered = int(np.sum(self.item_assignment >= 0))
-        
-        # Objective 2: Makespan
-        total_travel_cost = np.sum(robot_travel_times) * self.problem.renting_ratio
-        
-        # Objective 1: Task Completion Time (travel cost per item delivered)
-        task_completion_time = total_travel_cost / max(1, total_items_delivered)
-        
-        # Objective 3: Negative total profit (to minimize)
-        total_profit = - np.sum(robot_profits)
-        
-        return task_completion_time, total_travel_cost, total_profit
+        total_travel_time = float(np.sum(robot_travel_times))
+
+        # f2 – Makespan
+        makespan = total_travel_time * self.problem.renting_ratio
+
+        # f1 – Task Completion Time
+        tct = makespan / max(1, total_items_delivered)
+
+        # f3 – TTP standard objective
+        neg_G = -(total_raw_profit - self.problem.renting_ratio * total_travel_time)
+
+        # f4 – Weighted Priority Profit
+        neg_priority_profit = -float(np.sum(robot_priority_profit))
+
+        # f5 – Load Imbalance
+        load_imbalance = float(np.std(robot_weight_totals))
+
+        return tct, makespan, neg_G, neg_priority_profit, load_imbalance
     
     def evaluate_standard_ttp(self):
         """
