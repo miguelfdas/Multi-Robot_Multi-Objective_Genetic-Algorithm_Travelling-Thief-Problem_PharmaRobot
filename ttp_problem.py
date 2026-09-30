@@ -468,7 +468,7 @@ def plot_hospital_map(hmap, title='HUC Hospital Map', ax=None):
 def compute_fitness_bounds(problem):
     """
     Weighted Tchebycheff Aggregation:
-        - Multi-objective optimization via adaptive Weighted Tchebycheff Aggregation from NSGA-II
+        - Multi-objective optimization via adaptive Weighted Tchebycheff Aggregation 
         - Convert Multi-Objective Fitness to Scalar Fitness 
         - scalar_fitness = max {w_i x normalized(f_i)}
         - w_i: objective weight

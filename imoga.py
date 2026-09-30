@@ -1,7 +1,7 @@
 """
-PharmaRobot - Multi-Objective Genetic Algorithm
+PharmaRobot - Improved Multi-Objective Genetic Algorithm (IMOGA)
 
-A single GA with Adaptive Weighted Tchebycheff Aggregation from Non-dominated Sorting Genetic Algorithm II (NSGA-II)
+Multi-objective Genetic Algorithm with Adaptive Weighted Tchebycheff Aggregation to Scalar Fitness, based on MOEA/D
 
 GA Lifecycle
 
@@ -19,11 +19,11 @@ Survivor Selection
     - Elit size = 2
 
 Mate Selection:
+- Binary Tournament Selection
 - Tournament Selection [Miller & Goldberg, 1995]
 - Tournament size = 2
 
 Crossover:
-
     - Order Crossover (OX) for tours [Davis, 1985]
         - Preserves relative order of cities
         - Prevents invalid tours (duplicate cities)
@@ -65,7 +65,7 @@ from individual import Individual
 class GeneticAlgorithm:
     """
     Genetic Algorithm (GA)
-    Dynamic weight adjustment (Multi-Objective)
+    Dynamic weight adjustment
     """
     
     def __init__(self, problem, pop_size=200, generations=100, cx_pb_tour=0.8, cx_pb_pack=0.8, mut_pb_tour=0.2, mut_pb_pack=0.1, tournament_size=2, elitism=2, n_jobs=-1, seed=None):
@@ -109,7 +109,6 @@ class GeneticAlgorithm:
         
         # Tchebycheff weights equal initial importance across 4 objectives
         self.objective_weights = np.ones(2) / 2.0 # [1/2, 1/2] [Makespan, TWT]
-        self.pareto_front = None
 
         self.rng = np.random.RandomState(seed)
         
@@ -125,7 +124,7 @@ class GeneticAlgorithm:
     def calculate_scalar_fitness(self, objectives):
         """
         Weighted Tchebycheff Aggregation:
-            - Multi-objective optimization via adaptive Weighted Tchebycheff Aggregation from NSGA-II
+            - Multi-objective optimization via adaptive Weighted Tchebycheff Aggregation
             - Convert Multi-Objective Fitness to Scalar Fitness (Zhang & Li, 2007 MOEA/D)
             - scalar_fitness = max {w_i x normalized(f_i)}
             - w_i: objective weight
@@ -168,7 +167,7 @@ class GeneticAlgorithm:
 
         self.objective_weights = np.array([w_Makespan, w_TWT])
 
-    def initialize_population(self):
+    def initialize_population_old(self):
         """        
         Initialize population with Hybrid Strategy (Faulkner et al., 2015):
 
@@ -199,15 +198,26 @@ class GeneticAlgorithm:
         
         self.population = random_inds + greedy_inds
     
+    def initialize_population(self):
+        """        
+        Initialise population with K-Means:
+            - K-Means Initialisation with Repair
+            - Spatially clusters tasks and assigns them to the nearest robot
+            - Accelerates convergence by embedding elite initial sequences
+        """
+         
+        seeds_kmeans = self.rng.randint(0, int(1e9), self.pop_size)
+        kmeans_inds = Parallel(n_jobs=self.n_jobs)(delayed(Individual.kmeans_initialisation)(self.problem, seed=int(s)) for s in seeds_kmeans)
+        
+        self.population = kmeans_inds
+    
     def evaluate_population(self):
         """
         Evaluate all individuals in parallel
-        - Each individual evaluates multi-objective fitness
+        - Each individual evaluates Scalar fitness computed via Tchebycheff Aggregation
         - Update reference points
-        - Scalar fitness computed via Tchebycheff aggregation
         """
-        
-        # Evaluation of multi-objective fitness            
+                  
         fitness_results = Parallel(n_jobs=self.n_jobs)(delayed(ind.evaluate_fitness)() for ind in self.population)
         for ind, fit in zip(self.population, fitness_results):
             ind.fitness = fit
@@ -386,6 +396,24 @@ class GeneticAlgorithm:
                     choices = valid_robots + [-1] if valid_robots else [-1]
                     assignment[i] = self.rng.choice(choices)
     
+    def mutate_creep(self, charge_aggressiveness):
+        """
+        Creep Mutation para parâmetros contínuos (charge_aggressiveness).
+        
+        Aplica um pequeno ruído Gaussiano (Gaussian noise) para permitir o ajuste 
+        fino (fine-tuning) do limiar de carregamento, sem destruir as 
+        características da solução promissora.
+        """
+        for i in range(len(charge_aggressiveness)):
+            # Aplica a mutação a cada gene individualmente de acordo com a probabilidade
+            if self.rng.rand() < self.mut_pb_pack:
+                # scale=0.1 define o tamanho do "passo" (step size) da mutação
+                noise = self.rng.normal(loc=0.0, scale=0.1)
+                charge_aggressiveness[i] += noise
+                
+        # Garante que os valores se mantêm dentro dos limites fisicamente válidos [0.0, 1.0]
+        np.clip(charge_aggressiveness, 0.0, 1.0, out=charge_aggressiveness)
+    
     def calculate_diversity(self):
         """
         Calculate population diversity.
@@ -555,28 +583,6 @@ class GeneticAlgorithm:
         self.mut_pb_tour = float(np.clip(self.mut_tour_base * scale, self.mut_tour_min, self.mut_tour_max))
         self.mut_pb_pack = float(np.clip(self.mut_pack_base * scale, self.mut_pack_min, self.mut_pack_max))
     
-    def compute_pareto_front(self):
-        """
-        Extract non-dominated solutions (approximate Pareto front) from the current population
-        A solution is non-dominated if no other solution is better or equal in all objectives and strictly better in at least one
-        """
-        
-        objectives = np.array([ind.fitness for ind in self.population])
-        
-        n = len(objectives)
-        is_dominated = np.zeros(n, dtype=bool)
-        
-        for i in range(n):
-            for j in range(n):
-                if i == j:
-                    continue
-                # j dominates i if j is <= in all and < in at least one
-                if (np.all(objectives[j] <= objectives[i]) and np.any(objectives[j] < objectives[i])):
-                    is_dominated[i] = True
-                    break
-        
-        self.pareto_front = objectives[~is_dominated]
-    
     def evolve_generation(self):
         """
         Evolves the population by one generation.
@@ -631,11 +637,7 @@ class GeneticAlgorithm:
                     self.mutate_swap(child.tours[k])
                 tour_city_sets = [set(t) for t in child.tours]
                 self.mutate_bitflip(tour_city_sets, child.item_assignment)
-
-                if self.rng.rand() < self.mut_pb_pack:
-                    noise = self.rng.normal(0, 0.1, size=self.problem.num_robots)
-                    child.charge_aggressiveness += noise
-                    child.charge_aggressiveness = np.clip(child.charge_aggressiveness, 0.0, 1.0)
+                self.mutate_creep(child.charge_aggressiveness)
 
             child1.repair()
             child2.repair()
@@ -685,9 +687,7 @@ class GeneticAlgorithm:
             geno_div, pheno_div, priority_div = self.evolve_generation()
             self.evaluate_population()
             self.update_best_individual()
-            
-            self.compute_pareto_front()
-            
+                        
             step = max(1, self.generations // 4)
             if gen % step == 0 or gen == self.generations:
                 mksp = self.best_individual.fitness[0]

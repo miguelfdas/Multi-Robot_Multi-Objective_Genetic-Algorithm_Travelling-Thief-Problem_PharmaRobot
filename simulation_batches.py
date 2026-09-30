@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 import csv
 import json
-from ga import GeneticAlgorithm
+from imoga import GeneticAlgorithm
 
 # Constants for mapping real hospital data to TTP problem format
 ROOM_MAP = {
@@ -319,7 +319,6 @@ class GADecisionService:
             'best_TWT': float(ga.best_individual.fitness[1]),
             'mean_Makespan': float(np.mean([ind.fitness[0] for ind in ga.population])),
             'mean_TWT': float(np.mean([ind.fitness[1] for ind in ga.population])),
-            'pareto_front_size': len(ga.pareto_front),
             'genotypic_diversity': float(geno_div),
             'phenotypic_diversity': float(pheno_div),
             'priority_diversity': float(priority_div),

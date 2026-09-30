@@ -108,10 +108,9 @@ class Individual:
         
         self.charge_aggressiveness = charge_aggressiveness
         
-        
         # Multi-objective fitness
         self.fitness = None # 2-objective [f0, f1]
-        self.scalar_fitness = np.inf # for selection purposes (e.g. NSGA-II crowding distance or MOEA/D scalarisation)
+        self.scalar_fitness = np.inf
 
     @classmethod #classmethod is to allow calling Individual.random() without needing an instance
     def random(cls, problem, seed=None):
@@ -192,6 +191,124 @@ class Individual:
         ind = cls(problem, tours, item_assignment, charge_aggressiveness)
         ind.repair()
 
+        return ind
+    
+    @classmethod
+    def kmeans_initialisation(cls, problem, seed=None):
+        """
+        K-Means Initialisation (Xu et al., 2026)
+        Spatially clusters tasks and assigns each cluster to the nearest robot.
+        
+        - Extracts spatial coordinates of each medication/task
+        - Runs K-Means clustering to partition tasks into K clusters
+        - Maps the cluster centroids to the robots' initial positions
+        - Assigns medications respecting Knapsack capacity and priority constraints
+        - Builds the initial delivery route via Nearest-Neighbour heuristic
+        """
+        rng = np.random.RandomState(seed)
+        num_robots = problem.num_robots
+        num_items = problem.num_items
+        
+        if num_items == 0:
+            return cls.random(problem, seed)
+
+        # 1. Extract spatial coordinates (x, y) of each medication/task
+        item_coords = np.zeros((num_items, 2))
+        for i in range(num_items):
+            dest_city = int(problem.items[i, 1])
+            item_coords[i] = problem.cities[dest_city]
+
+        # 2. Execute the standard K-Means algorithm
+        # Randomly initialise centroids from the task coordinates
+        initial_indices = rng.choice(num_items, min(num_robots, num_items), replace=False)
+        centroids = item_coords[initial_indices].copy()
+
+        # Compensation in case there are fewer items than robots
+        if len(centroids) < num_robots:
+            extra = np.zeros((num_robots - len(centroids), 2))
+            centroids = np.vstack([centroids, extra])
+
+        labels = np.zeros(num_items, dtype=int)
+        for _ in range(100):  # Iteration limit
+            # Assign each task to the nearest centroid
+            distances = np.linalg.norm(item_coords[:, np.newaxis] - centroids, axis=2)
+            new_labels = np.argmin(distances, axis=1)
+
+            # Recalculate centroid coordinates
+            new_centroids = np.zeros_like(centroids)
+            for k in range(num_robots):
+                cluster_points = item_coords[new_labels == k]
+                if len(cluster_points) > 0:
+                    new_centroids[k] = cluster_points.mean(axis=0)
+                else:
+                    new_centroids[k] = centroids[k] 
+
+            if np.array_equal(labels, new_labels):
+                break
+            labels = new_labels
+            centroids = new_centroids
+
+        # 3. Map centroids to the initial positions of the robots
+        robot_coords = np.array([problem.cities[int(pos)] for pos in problem.position])
+        cluster_to_robot = {}
+        available_robots = set(range(num_robots))
+
+        for k in range(num_robots):
+            # Calculate the distance between available robots and the current centroid
+            dist_to_robots = np.linalg.norm(robot_coords - centroids[k], axis=1)
+            for r in range(num_robots):
+                if r not in available_robots:
+                    dist_to_robots[r] = np.inf
+            
+            # The nearest robot assumes responsibility for the tasks of this cluster
+            closest_robot = np.argmin(dist_to_robots)
+            cluster_to_robot[k] = closest_robot
+            available_robots.remove(closest_robot)
+
+        # 4. Assign items respecting Knapsack capacity and priority constraints
+        item_assignment = np.full(num_items, -1, dtype=int)
+        robot_counts = np.zeros(num_robots, dtype=int)
+        
+        priorities = problem.items[:, 2]
+        sorted_items = np.argsort(-priorities)  # Highest priority first
+
+        for item_idx in sorted_items:
+            cluster_id = labels[item_idx]
+            robot_id = cluster_to_robot[cluster_id]
+
+            if robot_counts[robot_id] < problem.knapsack_capacity:
+                item_assignment[item_idx] = robot_id
+                robot_counts[robot_id] += 1
+
+        # 5. Route construction via Nearest-Neighbour inter-cluster heuristic
+        tours = []
+        for k in range(num_robots):
+            start = int(problem.position[k])
+            assigned_items = np.where(item_assignment == k)[0]
+            
+            unvisited = set()
+            for idx in assigned_items:
+                dest = int(problem.items[idx, 1])
+                if dest != 0 and dest != start:
+                    unvisited.add(dest)
+
+            nn_order = []
+            current = start
+            while unvisited:
+                # Sort destinations by distance in the time_matrix with a minor stochastic tie-breaker
+                dists = sorted([(r, problem.time_matrix[current, r]) for r in unvisited], key=lambda x: (x[1], rng.random()))
+                nearest = dists[0][0]
+                nn_order.append(nearest)
+                unvisited.discard(nearest)
+                current = nearest
+                
+            tours.append([start] + nn_order + [0])
+
+        charge_aggressiveness = rng.uniform(0.0, 1.0, size=num_robots)
+
+        ind = cls(problem, tours, item_assignment, charge_aggressiveness)
+        ind.repair()
+        
         return ind
     
     def repair_old(self):
